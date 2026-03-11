@@ -1328,6 +1328,275 @@ export class ChipotleSession {
   }
 
   // -----------------------------------------------------------------------
+  // select_location — persist chosen location for subsequent orders
+  // -----------------------------------------------------------------------
+  async selectLocation(locationId: string): Promise<{
+    success: boolean;
+    location?: Location;
+    message?: string;
+    error?: string;
+  }> {
+    try {
+      const result = await this.getLocation(locationId);
+      if (!result.success || !result.location) {
+        return { success: false, error: result.error ?? "Location not found" };
+      }
+      // Store selected location in orderBuilder context
+      (this as unknown as Record<string, unknown>)._selectedLocationId = locationId;
+      (this as unknown as Record<string, unknown>)._selectedLocation = result.location;
+      return {
+        success: true,
+        location: result.location,
+        message: `Selected location: ${result.location.name} at ${result.location.address}, ${result.location.city}`,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Failed to select location",
+      };
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // set_order_type — choose pickup, delivery, or group order
+  // -----------------------------------------------------------------------
+  async setOrderType(orderType: "pickup" | "delivery" | "group"): Promise<{
+    success: boolean;
+    orderType?: string;
+    message?: string;
+    error?: string;
+  }> {
+    try {
+      (this as unknown as Record<string, unknown>)._orderType = orderType;
+      const descriptions: Record<string, string> = {
+        pickup: "Order will be ready for pickup at the selected restaurant",
+        delivery: "Order will be delivered to your address",
+        group: "Group order — others can add items before checkout",
+      };
+      return {
+        success: true,
+        orderType,
+        message: descriptions[orderType] ?? `Order type set to ${orderType}`,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Failed to set order type",
+      };
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // get_order_history
+  // -----------------------------------------------------------------------
+  async getOrderHistory(limit = 10): Promise<{
+    success: boolean;
+    orders?: Array<{
+      orderId: string;
+      date: string;
+      location: string;
+      items: string[];
+      total?: string;
+      status: string;
+    }>;
+    error?: string;
+  }> {
+    const p = await this.getPage();
+    const ctx = await this.getContext();
+
+    try {
+      await p.goto(`${ORDER_URL}/en-us/account/orders`, {
+        waitUntil: "domcontentloaded",
+        timeout: DEFAULT_TIMEOUT,
+      });
+      await p.waitForTimeout(3000);
+
+      // Try API endpoint first
+      const apiOrders = await p.evaluate(async () => {
+        try {
+          const res = await fetch(
+            "https://services.chipotle.com/order/v3/orders?limit=20&status=CLOSED",
+            {
+              credentials: "include",
+              headers: { "Content-Type": "application/json" },
+            }
+          );
+          if (!res.ok) return null;
+          return await res.json();
+        } catch {
+          return null;
+        }
+      });
+
+      if (apiOrders && (apiOrders.orders || apiOrders.data)) {
+        const rawOrders: unknown[] = apiOrders.orders ?? apiOrders.data ?? [];
+        const orders = rawOrders.slice(0, limit).map((o: unknown) => {
+          const order = o as Record<string, unknown>;
+          const itemsArr = Array.isArray(order.items) ? order.items : [];
+          return {
+            orderId: (order.orderId ?? order.id ?? "unknown") as string,
+            date: (order.createdDate ?? order.orderDate ?? order.placedAt ?? "") as string,
+            location: (order.restaurantName ?? order.locationName ?? "") as string,
+            items: itemsArr.map((i: unknown) => {
+              const item = i as Record<string, unknown>;
+              return (item.name ?? item.productName ?? String(i)) as string;
+            }),
+            total: order.totalPrice != null ? `$${order.totalPrice}` : undefined,
+            status: (order.status ?? "completed") as string,
+          };
+        });
+        await saveCookies(ctx);
+        return { success: true, orders };
+      }
+
+      // Fall back to DOM scraping
+      const orderCards = p.locator(
+        '[class*="order-card"], [class*="recent-order"], [data-testid*="order"]'
+      );
+      const count = Math.min(await orderCards.count(), limit);
+      const orders: Array<{
+        orderId: string;
+        date: string;
+        location: string;
+        items: string[];
+        total?: string;
+        status: string;
+      }> = [];
+
+      for (let i = 0; i < count; i++) {
+        const card = orderCards.nth(i);
+        const id =
+          (await card.getAttribute("data-order-id").catch(() => "")) ??
+          `order-${i + 1}`;
+        const date =
+          (await card
+            .locator("[class*='date'], [class*='time']")
+            .first()
+            .textContent()
+            .catch(() => "")) ?? "";
+        const location =
+          (await card
+            .locator("[class*='location'], [class*='restaurant']")
+            .first()
+            .textContent()
+            .catch(() => "")) ?? "";
+        const itemText =
+          (await card
+            .locator("[class*='item'], [class*='product']")
+            .allTextContents()
+            .catch(() => [])) ?? [];
+        const total =
+          (await card
+            .locator("[class*='total'], [class*='price']")
+            .first()
+            .textContent()
+            .catch(() => "")) ?? "";
+        orders.push({
+          orderId: id,
+          date: date.trim(),
+          location: location.trim(),
+          items: itemText.map((t) => t.trim()).filter(Boolean),
+          total: total.trim() || undefined,
+          status: "completed",
+        });
+      }
+
+      await saveCookies(ctx);
+      return { success: true, orders };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Failed to get order history",
+      };
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // reorder — quick reorder a past order by ID
+  // -----------------------------------------------------------------------
+  async reorder(orderId: string): Promise<{
+    success: boolean;
+    message?: string;
+    bag?: unknown;
+    error?: string;
+  }> {
+    const p = await this.getPage();
+    const ctx = await this.getContext();
+
+    try {
+      // Try API reorder endpoint
+      const apiResult = await p.evaluate(async (id: string) => {
+        try {
+          const res = await fetch(
+            `https://services.chipotle.com/order/v3/orders/${id}/reorder`,
+            {
+              method: "POST",
+              credentials: "include",
+              headers: { "Content-Type": "application/json" },
+            }
+          );
+          if (!res.ok) return null;
+          return await res.json();
+        } catch {
+          return null;
+        }
+      }, orderId);
+
+      if (apiResult) {
+        await saveCookies(ctx);
+        return {
+          success: true,
+          message: `Order ${orderId} items have been added to your bag`,
+          bag: apiResult,
+        };
+      }
+
+      // Fall back: navigate to order history and click reorder
+      await p.goto(`${ORDER_URL}/en-us/account/orders`, {
+        waitUntil: "domcontentloaded",
+        timeout: DEFAULT_TIMEOUT,
+      });
+      await p.waitForTimeout(2000);
+
+      // Find the order card with matching ID or just the first reorder button
+      const reorderBtn = orderId
+        ? p
+            .locator(
+              `[data-order-id="${orderId}"] [class*="reorder"], [data-order-id="${orderId}"] button:has-text("reorder")`
+            )
+            .first()
+        : p
+            .locator(
+              '[class*="reorder-btn"], button:has-text("Reorder"), button:has-text("reorder")'
+            )
+            .first();
+
+      const visible = await reorderBtn
+        .isVisible({ timeout: 3000 })
+        .catch(() => false);
+      if (visible) {
+        await reorderBtn.click();
+        await p.waitForTimeout(2000);
+        await saveCookies(ctx);
+        return {
+          success: true,
+          message: `Reorder initiated for order ${orderId}. Items added to your bag.`,
+        };
+      }
+
+      return {
+        success: false,
+        error: `Could not find reorder option for order ${orderId}. You may need to be logged in.`,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : "Failed to reorder",
+      };
+    }
+  }
+
+  // -----------------------------------------------------------------------
   // get_rewards
   // -----------------------------------------------------------------------
   async getRewards(): Promise<{

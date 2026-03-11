@@ -236,6 +236,66 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         "Get your Chipotle Rewards points balance and available rewards. Requires being logged in.",
       inputSchema: { type: "object", properties: {} },
     },
+    {
+      name: "chipotle_select_location",
+      description:
+        "Select a specific Chipotle restaurant for your order. Call after chipotle_search_locations to confirm which restaurant to use.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          locationId: {
+            type: "string",
+            description: "Location ID from chipotle_search_locations results",
+          },
+        },
+        required: ["locationId"],
+      },
+    },
+    {
+      name: "chipotle_set_order_type",
+      description:
+        "Set the order fulfillment type before building your order: pickup (you collect in-store), delivery (brought to you), or group (others can add items).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          orderType: {
+            type: "string",
+            description: "How the order will be fulfilled",
+            enum: ["pickup", "delivery", "group"],
+          },
+        },
+        required: ["orderType"],
+      },
+    },
+    {
+      name: "chipotle_get_order_history",
+      description:
+        "Get your past Chipotle orders with items, dates, locations, and totals. Requires being logged in.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          limit: {
+            type: "number",
+            description: "Maximum number of past orders to return (default: 10)",
+          },
+        },
+      },
+    },
+    {
+      name: "chipotle_reorder",
+      description:
+        "Quickly reorder a previous Chipotle order by its order ID. Items from the past order will be added to your bag. Requires being logged in.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          orderId: {
+            type: "string",
+            description: "Order ID from chipotle_get_order_history results",
+          },
+        },
+        required: ["orderId"],
+      },
+    },
   ],
 }));
 
@@ -315,6 +375,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "chipotle_get_rewards":
         return wrap(await s.getRewards());
+
+      case "chipotle_select_location":
+        return wrap(await s.selectLocation(a.locationId as string));
+
+      case "chipotle_set_order_type":
+        return wrap(await s.setOrderType(a.orderType as "pickup" | "delivery" | "group"));
+
+      case "chipotle_get_order_history":
+        return wrap(await s.getOrderHistory((a.limit as number) || 10));
+
+      case "chipotle_reorder":
+        return wrap(await s.reorder(a.orderId as string));
 
       default:
         return wrap({ success: false, error: `Unknown tool: ${name}` }, true);
