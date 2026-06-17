@@ -1223,10 +1223,34 @@ export class ChipotleSession {
       await placeOrderBtn.first().click();
       await p.waitForTimeout(6000);
 
+      // Read the REAL confirmation id: first from the URL, then from an
+      // on-page confirmation element. Never fabricate an id.
       const urlMatch = p.url().match(/order[_-]?(?:confirm|success|id)[=\/]([A-Z0-9-]+)/i);
-      const orderId = urlMatch?.[1] || `chipotle-${Date.now()}`;
+      let orderId: string | undefined = urlMatch?.[1] || undefined;
+
+      if (!orderId) {
+        const confirmText =
+          (await p
+            .locator(
+              '[data-testid*="order-confirmation"], [class*="order-confirmation"], [class*="confirmation-number"], [class*="order-number"]'
+            )
+            .first()
+            .textContent({ timeout: 5000 })
+            .catch(() => null)) || null;
+        const idMatch = confirmText?.match(/([A-Z0-9][A-Z0-9-]{4,})/i);
+        orderId = idMatch?.[1];
+      }
 
       await saveCookies(ctx);
+
+      if (!orderId) {
+        return {
+          success: false,
+          summary,
+          error:
+            "Order may not have completed \u2014 could not read a confirmation number after submitting. Verify the order in the Chipotle app before retrying.",
+        };
+      }
 
       return {
         success: true,
